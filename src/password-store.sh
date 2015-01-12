@@ -16,23 +16,40 @@ X_SELECTION="${PASSWORD_STORE_X_SELECTION:-clipboard}"
 CLIP_TIME="${PASSWORD_STORE_CLIP_TIME:-45}"
 
 export GIT_DIR="${PASSWORD_STORE_GIT:-$PREFIX}/.git"
-export GIT_WORK_TREE="${PASSWORD_STORE_GIT:-$PREFIX}"
+export MTN_DIR="${PASSWORD_STORE_MTN:-$PREFIX}/_MTN"
 
 #
 # BEGIN helper functions
 #
 
 git_add_file() {
-	[[ -d $GIT_DIR ]] || return
-	git add "$1" || return
-	[[ -n $(git status --porcelain "$1") ]] || return
-	git_commit "$2"
+	#TODO? rename to scm_add_file
+	if [[ -d $GIT_DIR ]]; then
+		git add "$1" || return
+		[[ -n $(git status --porcelain "$1") ]] || return
+		git_commit "$2"
+		return
+	elif [[ -d $MTN_DIR ]]; then
+		[[ "${1:0:${#PREFIX}}" == "$PREFIX" ]] || return
+		local relative="${1:${#PREFIX}}"
+		[[ -z "$relative" ]] && relative="."
+		cd "$PREFIX"
+		mtn add -R "$relative" || return
+		git_commit "$2"
+		return
+	fi
 }
 git_commit() {
-	local sign=""
-	[[ -d $GIT_DIR ]] || return
-	[[ $(git config --bool --get pass.signcommits) == "true" ]] && sign="-S"
-	git commit $sign -m "$1"
+	#TODO? rename to scm_commit
+	if [[ -d $GIT_DIR ]]; then
+		local sign=""
+		[[ $(git config --bool --get pass.signcommits) == "true" ]] && sign="-S"
+		git commit $sign -m "$1"
+		return
+	elif [[ -d $MTN_DIR ]]; then
+		mtn commit -m "$1"
+		return
+	fi
 }
 yesno() {
 	[[ -t 0 ]] || return 0
@@ -257,6 +274,9 @@ cmd_usage() {
 	    $PROGRAM git git-command-args...
 	        If the password store is a git repository, execute a git command
 	        specified by git-command-args.
+	    $PROGRAM mtn mtn-command-args...
+	        If the password store is a monotone repository, execute a mtn command
+	        specified by mtn-command-args.
 	    $PROGRAM help
 	        Show this text.
 	    $PROGRAM version
@@ -287,6 +307,9 @@ cmd_init() {
 		rm -v -f "$gpg_id" || exit 1
 		if [[ -d $GIT_DIR ]]; then
 			git rm -qr "$gpg_id"
+			git_commit "Deinitialize ${gpg_id}."
+		elif [[ -d $MTN_DIR ]]; then
+			mtn rm -R "$gpg_id"
 			git_commit "Deinitialize ${gpg_id}."
 		fi
 		rmdir -p "${gpg_id%/*}" 2>/dev/null
@@ -332,7 +355,7 @@ cmd_show() {
 		else
 			echo "${path%\/}"
 		fi
-		tree -C -l --noreport "$PREFIX/$path" | tail -n +2 | sed 's/\.gpg$//'
+		tree -C -l --noreport -I _MTN "$PREFIX/$path" | tail -n +2 | sed 's/\.gpg$//'
 	elif [[ -z $path ]]; then
 		die "Error: password store is empty. Try \"pass init\"."
 	else
@@ -344,7 +367,7 @@ cmd_find() {
 	[[ -z "$@" ]] && die "Usage: $PROGRAM $COMMAND pass-names..."
 	IFS="," eval 'echo "Search Terms: $*"'
 	local terms="*$(printf '%s*|*' "$@")"
-	tree -C -l --noreport -P "${terms%|*}" --prune --matchdirs --ignore-case "$PREFIX" | tail -n +2 | sed 's/\.gpg$//'
+	tree -C -l --noreport -I _MTN -P "${terms%|*}" --prune --matchdirs --ignore-case "$PREFIX" | tail -n +2 | sed 's/\.gpg$//'
 }
 
 cmd_grep() {
@@ -511,6 +534,9 @@ cmd_delete() {
 	if [[ -d $GIT_DIR && ! -e $passfile ]]; then
 		git rm -qr "$passfile"
 		git_commit "Remove $path from store."
+	elif [[ -d $MTN_DIR && ! -e $passfile ]]; then
+		mtn rm -R "$passfile"
+		git_commit "Remove $path from store."
 	fi
 	rmdir -p "${passfile%/*}" 2>/dev/null
 }
@@ -551,6 +577,9 @@ cmd_copy_move() {
 		if [[ -d $GIT_DIR && ! -e $old_path ]]; then
 			git rm -qr "$old_path"
 			git_add_file "$new_path" "Rename ${1} to ${2}."
+		elif [[ -d $GIT_DIR && ! -e $old_path ]]; then
+			mtn mv --bookkeep-only "$old_path" "$new_path"
+			git_commit "Rename ${1} to ${2}."
 		fi
 		rmdir -p "$old_dir" 2>/dev/null
 	else
@@ -578,6 +607,26 @@ cmd_git() {
 	fi
 }
 
+cmd_mtn() {
+	if [[ $1 == "init" ]]; then
+		local db="${3:-:password-store}"
+		local branch="${2:-org.passwordstore}"
+		if [[ -d "$PREFIX" ]]; then
+			mtn -d "$db" -b "$branch" head >/dev/null 2>/dev/null && die "When a repository is already existing use \"$PROGRAM mtn init\" to initialize store (without \"$PROGRAM mtn init\")."
+			mtn -d "$db" -b "$branch" setup "$PREFIX" || exit 1
+		else
+			mtn -d "$db" -b "$branch" checkout "$PREFIX" || exit 1
+		fi
+		git_add_file "$PREFIX" "Add current contents of password store."
+	elif [[ -d $MTN_DIR ]]; then
+		tmpdir nowarn #Defines $SECURE_TMPDIR. We don't warn, because at most, this only copies encrypted files.
+		export TMPDIR="$SECURE_TMPDIR"
+		mtn "$@"
+	else
+		die "Error: the password store is not a monotone repository. Try \"$PROGRAM mtn init [branch=org.passwordstore] [db=:password-store]\"."
+	fi
+}
+
 #
 # END subcommand functions
 #
@@ -599,6 +648,7 @@ case "$1" in
 	rename|mv) shift;		cmd_copy_move "move" "$@" ;;
 	copy|cp) shift;			cmd_copy_move "copy" "$@" ;;
 	git) shift;			cmd_git "$@" ;;
+	mtn) shift;			cmd_mtn "$@" ;;
 	*) COMMAND="show";		cmd_show "$@" ;;
 esac
 exit 0
