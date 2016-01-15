@@ -568,7 +568,7 @@ cmd_copy_move() {
 		if [[ -d $GIT_DIR && ! -e $old_path ]]; then
 			git rm -qr "$old_path"
 			git_add_file "$new_path" "Rename ${1} to ${2}."
-		elif [[ -d $GIT_DIR && ! -e $old_path ]]; then
+		elif [[ -d $MTN_DIR && ! -e $old_path ]]; then
 			mtn mv --bookkeep-only "$old_path" "$new_path"
 			git_commit "Rename ${1} to ${2}."
 		fi
